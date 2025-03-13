@@ -12,9 +12,12 @@ import base64
 
 load_dotenv()
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-worker_clients: list[Client] = [genai.Client(api_key=os.getenv("GEMINI_API_KEY_"+str(i))) for i in range(3)]
+worker_clients: list[Client] = [
+    genai.Client(api_key=os.getenv("GEMINI_API_KEY_" + str(i))) for i in range(3)
+]
 cf_ai_model = "@cf/black-forest-labs/flux-1-schnell"
 cf_ai_url = f"https://api.cloudflare.com/client/v4/accounts/{os.getenv("CF_ACCOUNT_ID")}/ai/run/{cf_ai_model}"
+
 
 class PromptSchema(BaseModel):
     """
@@ -22,8 +25,10 @@ class PromptSchema(BaseModel):
     section_name: Name of the section, as HTML ID
     prompt: Brief Description of the section
     """
+
     section_name: str
     prompt: str
+
 
 class PlanningResponse(BaseModel):
     """
@@ -33,10 +38,12 @@ class PlanningResponse(BaseModel):
     prompts: List of prompts which will be supplied to another LLM to generate output of the website. Should be individual sections of a page.
     skeleton: The framework of the website, no actual code.
     """
+
     theme_context: str
     shared_context: str
     prompts: list[PromptSchema]
     skeleton: str
+
 
 class ImagePromptResponse(BaseModel):
     """
@@ -44,8 +51,10 @@ class ImagePromptResponse(BaseModel):
     prompt: Prompt for the image to be generated. Should be very detailed.
     filename: Name of the file where this image should be saved and can be referenced in the website.
     """
+
     prompt: str
     filename: str
+
 
 class WorkerResponse(BaseModel):
     """
@@ -54,6 +63,7 @@ class WorkerResponse(BaseModel):
     css_code: Any optional CSS. Do not include any tags, only CSS
     js_code: Any optional Javascript. Do not include any tags, only Javascript
     """
+
     image_prompts: list[ImagePromptResponse]
     html_code: str
     css_code: Optional[str]
@@ -61,15 +71,26 @@ class WorkerResponse(BaseModel):
 
 
 async def generate_image(prompt, filename, session):
-    response = await session.post(cf_ai_url, headers={"Authorization": f"Bearer {os.getenv("CF_API_KEY")}"}, json={"prompt": prompt})
+    response = await session.post(
+        cf_ai_url,
+        headers={"Authorization": f"Bearer {os.getenv("CF_API_KEY")}"},
+        json={"prompt": prompt},
+    )
     response = await response.json()
-    if not response['success']:
+    if not response["success"]:
         print(f"Could not generate image for: {prompt}")
         return
     with open(f"static/{filename}", "wb") as f:
-        f.write(base64.decodebytes(response['result']["image"].encode()))
+        f.write(base64.decodebytes(response["result"]["image"].encode()))
 
-async def generate_section(prompt: str, shared_context: str, theme_context: str, section_name: str, index: int = 0):
+
+async def generate_section(
+    prompt: str,
+    shared_context: str,
+    theme_context: str,
+    section_name: str,
+    index: int = 0,
+):
     worker = worker_clients[index % len(worker_clients)]
     worker_response = await worker.aio.models.generate_content(
         model="gemini-2.0-flash-lite",
@@ -89,13 +110,24 @@ async def generate_section(prompt: str, shared_context: str, theme_context: str,
         Also include any custom font.
         Add micro transitions in the hero sections.
         Avoid adding multiple images to a section if not needed.
+        Make sure the text is readable and there is a contrast between the text and the background.
+        There should be no background images with any text anywhere in the website.
+        Buttons should have a contrasting foreground and background color.
+        For images, constrain them to a fixed size and only display those.
         """,
         config={
             "response_mime_type": "application/json",
             "response_schema": WorkerResponse,
-        }
+        },
     )
-    return (section_name, worker_response.parsed.html_code, worker_response.parsed.css_code, worker_response.parsed.js_code, worker_response.parsed.image_prompts)
+    return (
+        section_name,
+        worker_response.parsed.html_code,
+        worker_response.parsed.css_code,
+        worker_response.parsed.js_code,
+        worker_response.parsed.image_prompts,
+    )
+
 
 async def main():
     prompt = input(" > ")
@@ -126,7 +158,7 @@ async def main():
         config={
             "response_mime_type": "application/json",
             "response_schema": PlanningResponse,
-        }
+        },
     )
     print("Theme:", plan_response.parsed.theme_context)
     print("Context:", plan_response.parsed.shared_context)
@@ -134,14 +166,27 @@ async def main():
     tasks = []
     for i, plan_item in enumerate(plan_response.parsed.prompts):
         print(f"Prompt ({plan_item.section_name}): {plan_item.prompt}")
-        tasks.append(generate_section(plan_item.prompt, plan_response.parsed.shared_context, plan_response.parsed.theme_context, plan_item.section_name, i))
+        tasks.append(
+            generate_section(
+                plan_item.prompt,
+                plan_response.parsed.shared_context,
+                plan_response.parsed.theme_context,
+                plan_item.section_name,
+                i,
+            )
+        )
     results = await asyncio.gather(*tasks)
     collected_image_prompts = []
     css = []
     js = []
     aiohttp_session = aiohttp.ClientSession()
     for section, html_snippet, css_snippet, js_snippet, image_prompts in results:
-        collected_image_prompts.extend([generate_image(i.prompt, i.filename, aiohttp_session) for i in image_prompts])
+        collected_image_prompts.extend(
+            [
+                generate_image(i.prompt, i.filename, aiohttp_session)
+                for i in image_prompts
+            ]
+        )
         css.append(css_snippet)
         js.append(js_snippet)
         s = skeleton_soup.find(id=section)
@@ -161,6 +206,7 @@ async def main():
     await image_generation_requests
     await aiohttp_session.close()
 
+
 start = time.time()
 asyncio.run(main())
-print(time.time()-start)
+print(time.time() - start)
