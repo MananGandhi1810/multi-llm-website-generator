@@ -9,8 +9,14 @@ import os
 from dotenv import load_dotenv
 import bs4
 import time
+import aiohttp
+import base64
 
 load_dotenv()
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+worker_clients: list[Client] = [genai.Client(api_key=os.getenv("GEMINI_API_KEY_"+str(i))) for i in range(3)]
+cf_ai_model = "@cf/black-forest-labs/flux-1-schnell"
+cf_ai_url = f"https://api.cloudflare.com/client/v4/accounts/{os.getenv("CF_ACCOUNT_ID")}/ai/run/{cf_ai_model}"
 
 class PromptSchema(BaseModel):
     """
@@ -34,6 +40,15 @@ class PlanningResponse(BaseModel):
     prompts: list[PromptSchema]
     skeleton: str
 
+class ImagePromptResponse(BaseModel):
+    """
+    Response model for generating images for the website.
+    prompt: Prompt for the image to be generated. Should be very detailed.
+    filename: Name of the file where this image should be saved and can be referenced in the website.
+    """
+    prompt: str
+    filename: str
+
 class WorkerResponse(BaseModel):
     """
     Response Model for the workers creating sections of the website.
@@ -41,12 +56,20 @@ class WorkerResponse(BaseModel):
     css_code: Any optional CSS. Do not include any tags, only CSS
     js_code: Any optional Javascript. Do not include any tags, only Javascript
     """
+    image_prompts: list[ImagePromptResponse]
     html_code: str
     css_code: Optional[str]
     js_code: Optional[str]
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-worker_clients: list[Client] = [genai.Client(api_key=os.getenv("GEMINI_API_KEY_"+str(i%3))) for i in range(10)]
+
+async def generate_image(prompt, filename, session):
+    response = await session.post(cf_ai_url, headers={"Authorization": f"Bearer {os.getenv("CF_API_KEY")}"}, json={"prompt": prompt})
+    response = await response.json()
+    if not response['success']:
+        print(prompt)
+        raise Exception(response)
+    with open(f"static/{filename}", "wb") as f:
+        f.write(base64.decodebytes(response['result']["image"].encode()))
 
 async def generate_section(prompt: str, shared_context: str, theme_context: str, section_name: str, index: int = 0):
     worker = worker_clients[index % len(worker_clients)]
@@ -60,18 +83,21 @@ async def generate_section(prompt: str, shared_context: str, theme_context: str,
         You have been assigned only this section.
         Only generate this section, nothing else.
         Use Tailwind CSS for styling.
-        For images, use placeholder.png.
+        Add images to the image_prompts, and files should only be png file.
+        All images will be saved to /static/{"{filename}"}
         Make the design look modern and futuristic.
         Include Custom JS and CSS for that section if needed.
         Add interactivity in the elements if needed.
         Also include any custom font.
+        Add micro transitions in the hero sections.
+        Avoid adding multiple images to a section if not needed.
         """,
         config={
             "response_mime_type": "application/json",
             "response_schema": WorkerResponse,
         }
     )
-    return (section_name, worker_response.parsed.html_code, worker_response.parsed.css_code, worker_response.parsed.js_code)
+    return (section_name, worker_response.parsed.html_code, worker_response.parsed.css_code, worker_response.parsed.js_code, worker_response.parsed.image_prompts)
 
 async def main():
     prompt = input(" > ")
@@ -85,17 +111,17 @@ async def main():
         The plan of action should be the different sections on the landing page.
         The plan of action must contain prompts which will be given to the website generation model.
         Also, supply the HTML code containing the basic structure of the website, including the sections with their ID as the section name.
+        Include sizings for each section in the skeleton code, and share them in the prompt as well.
         DO NOT ADD ANY CODE EXCEPT BOILERPLATE/SKELETON CODE.
         Make sure you set the margins and padding to the body correctly.
-        The prompt should be detailed.
         Use Tailwind for styling.
         This is the tag for TailwindCSS: <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
         Include the Tailwind import tag in the skeleton.
         Put all repetitive information into the shared context.
-        Add website style, colours, font theming, font colours, etc in the theme context.
-        For images, use placeholder.png.
         Set a font if needed.
-        Share key details like font, colour scheme, sizing values and ratios in the context.
+        Add website style, colours, font theming, font colours, etc in the theme context.
+        The prompt should be very DETAILED, and all the sections of the website should be very CONSISTENT.
+        Also ask workers to add micro interactions and transitions to the hero elements.
         """,
         config={
             "response_mime_type": "application/json",
@@ -106,14 +132,19 @@ async def main():
     skeleton_soup = bs4.BeautifulSoup(plan_response.parsed.skeleton, "html.parser")
     tasks = []
     for i, plan_item in enumerate(plan_response.parsed.prompts):
+        print(f"Prompt ({plan_item.section_name}): {plan_item.prompt}")
         tasks.append(generate_section(plan_item.prompt, plan_response.parsed.shared_context, plan_response.parsed.theme_context, plan_item.section_name, i))
     results = await asyncio.gather(*tasks)
+    collected_image_prompts = []
     css = []
     js = []
-    for section, html_snippet, css_snippet, js_snippet in results:
+    aiohttp_session = aiohttp.ClientSession()
+    for section, html_snippet, css_snippet, js_snippet, image_prompts in results:
+        collected_image_prompts.extend([generate_image(i.prompt, i.filename, aiohttp_session) for i in image_prompts])
         css.append(css_snippet)
         js.append(js_snippet)
         skeleton_soup.find(id=section).replace_with(html_snippet)
+    image_generation_requests = asyncio.gather(*collected_image_prompts)
     css = "\n".join([x for x in css if x is not None])
     js = "\n".join([x for x in js if x is not None])
     skeleton_soup.head.insert(1, f"<style>\n{css}\n</style>")
@@ -122,6 +153,8 @@ async def main():
     output = output.replace("&lt;", "<").replace("&gt;", ">")
     with open("index.html", "w") as f:
         f.write(output)
+    await image_generation_requests
+    await aiohttp_session.close()
 
 start = time.time()
 asyncio.run(main())
