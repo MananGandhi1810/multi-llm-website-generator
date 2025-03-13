@@ -2,8 +2,6 @@ from typing import Optional
 from google import genai
 import asyncio
 from google.genai.client import Client
-from google.genai.types import Any, GenerateContentResponse
-from google.generativeai.types.generation_types import GenerationConfigDict
 from pydantic import BaseModel
 import os
 from dotenv import load_dotenv
@@ -101,7 +99,7 @@ async def generate_section(prompt: str, shared_context: str, theme_context: str,
 
 async def main():
     prompt = input(" > ")
-    plan_response: GenerateContentResponse = await client.aio.models.generate_content(
+    plan_response = await client.aio.models.generate_content(
         model="gemini-2.0-flash",
         contents=f"""
         This is the prompt of the user: {prompt}
@@ -111,6 +109,7 @@ async def main():
         The plan of action should be the different sections on the landing page.
         The plan of action must contain prompts which will be given to the website generation model.
         Also, supply the HTML code containing the basic structure of the website, including the sections with their ID as the section name.
+        The ID is very important,
         Include sizings for each section in the skeleton code, and share them in the prompt as well.
         DO NOT ADD ANY CODE EXCEPT BOILERPLATE/SKELETON CODE.
         Make sure you set the margins and padding to the body correctly.
@@ -130,6 +129,7 @@ async def main():
         }
     )
     print("Theme:", plan_response.parsed.theme_context)
+    print("Context:", plan_response.parsed.shared_context)
     skeleton_soup = bs4.BeautifulSoup(plan_response.parsed.skeleton, "html.parser")
     tasks = []
     for i, plan_item in enumerate(plan_response.parsed.prompts):
@@ -144,14 +144,18 @@ async def main():
         collected_image_prompts.extend([generate_image(i.prompt, i.filename, aiohttp_session) for i in image_prompts])
         css.append(css_snippet)
         js.append(js_snippet)
-        skeleton_soup.find(id=section).replace_with(html_snippet)
+        s = skeleton_soup.find(id=section)
+        if not s:
+            print(f"Section {section} not found in skeleton")
+            continue
+        s.replace_with(html_snippet)
     image_generation_requests = asyncio.gather(*collected_image_prompts)
     css = "\n".join([x for x in css if x is not None])
     js = "\n".join([x for x in js if x is not None])
     skeleton_soup.head.insert(1, f"<style>\n{css}\n</style>")
     skeleton_soup.head.insert(1, f"<script>\n{js}\n</script>")
     output = skeleton_soup.prettify()
-    output = output.replace("&lt;", "<").replace("&gt;", ">")
+    output = output.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
     with open("index.html", "w") as f:
         f.write(output)
     await image_generation_requests
