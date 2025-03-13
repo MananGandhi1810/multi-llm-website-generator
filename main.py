@@ -66,8 +66,8 @@ async def generate_image(prompt, filename, session):
     response = await session.post(cf_ai_url, headers={"Authorization": f"Bearer {os.getenv("CF_API_KEY")}"}, json={"prompt": prompt})
     response = await response.json()
     if not response['success']:
-        print(prompt)
-        raise Exception(response)
+        print(f"Could not generate image for: {prompt}")
+        return
     with open(f"static/{filename}", "wb") as f:
         f.write(base64.decodebytes(response['result']["image"].encode()))
 
@@ -118,6 +118,7 @@ async def main():
         This is the tag for TailwindCSS: <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
         Include the Tailwind import tag in the skeleton.
         Put all repetitive information into the shared context.
+        Explain the website in detail in the shared context.
         Set a font if needed.
         Add website style, colours, font theming, font colours, etc in the theme context.
         The prompt should be very DETAILED, and all the sections of the website should be very CONSISTENT.
